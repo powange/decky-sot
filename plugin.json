@@ -1,0 +1,14 @@
+{
+  "name": "Decky SoT",
+  "author": "powange",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "sea-of-thieves",
+      "overlay",
+      "utility"
+    ],
+    "description": "Sea of Thieves helpers: when the storm reaches your chosen islands, shown as an in-game overlay."
+  }
+}

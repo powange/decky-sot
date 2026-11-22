@@ -1,0 +1,92 @@
+{
+ "getElements": [
+  {
+   "id": "CE1A9A07-5BED-469E-AB10-05DE90111982",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Lagoon of Whispers"
+     }
+    }
+   ]
+  },
+  {
+   "id": "9D956DF8-B950-438F-AF49-0E0F1E61F733",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Lone Cove"
+     }
+    }
+   ]
+  },
+  {
+   "id": "50E50734-6BDC-4096-9C80-0E5A1F9A7617",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "The Spoils of Plenty Store"
+     }
+    }
+   ]
+  },
+  {
+   "id": "89B27EE9-B452-4FA9-8BF5-0F2CC5CAD72C",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Rum Runner Isle"
+     }
+    }
+   ]
+  },
+  {
+   "id": "7FF39D9B-0272-4B5B-A0B0-128685D902B8",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Three Paces East Seapost"
+     }
+    }
+   ]
+  },
+  {
+   "id": "8E220556-D728-4E7E-B0D5-15D7A7B9FCAD",
+   "attributes": [
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Cursewater Shores"
+     }
+    }
+   ]
+  },
+  {
+   "id": "00000000-0000-0000-0000-00000000DEAD",
+   "attributes": [
+    {
+     "type": "realm",
+     "value": "sea-of-the-damned"
+    },
+    {
+     "type": "name",
+     "localization": {
+      "locale": "en",
+      "value": "Sea of the Damned"
+     }
+    }
+   ]
+  }
+ ]
+}
