@@ -7,6 +7,7 @@ import {
   ModalRoot,
   PanelSection,
   PanelSectionRow,
+  SliderField,
   TextField,
   ToggleField,
   showModal,
@@ -27,6 +28,8 @@ interface Settings {
   hide_without_storm: boolean;
   sort_by_time: boolean;
   show_under_minutes: number;
+  rain_scale: number;
+  offset_seconds: number;
   islands: string[];
   overlay_install_prompted: boolean;
 }
@@ -37,6 +40,7 @@ interface IslandStatus {
   index: number;
   state: "now" | "soon" | "none" | "unknown";
   at?: number;
+  until?: number | null;
 }
 
 interface Island {
@@ -69,6 +73,7 @@ const moveIsland = callable<[id: string, delta: number], State>("move_island");
 const saveSettings = callable<[settings: Partial<Settings>], State>("save_settings");
 const previewOverlay = callable<[], State>("preview_overlay");
 const overlayInstallPrompted = callable<[], State>("overlay_install_prompted");
+const calibrate = callable<[id: string], State & { calibrated: number | null }>("calibrate");
 
 // Must match MAX_ISLANDS in main.py (one overlay line per island).
 const MAX_ISLANDS = 12;
@@ -99,6 +104,16 @@ function formatCountdown(seconds: number): string {
   return h ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
+// "+9 min 30 s", "-2 min", "aucun"
+function formatOffset(seconds: number): string {
+  if (!seconds) return "aucun";
+  const sign = seconds > 0 ? "+" : "-";
+  const abs = Math.abs(Math.round(seconds));
+  const m = Math.floor(abs / 60);
+  const s = abs % 60;
+  return `${sign}${m ? `${m} min` : ""}${m && s ? " " : ""}${s ? `${s} s` : ""}`;
+}
+
 function formatClock(unix: number): string {
   const d = new Date(unix * 1000);
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -108,10 +123,17 @@ function formatClock(unix: number): string {
 function LiveStatus({ s }: { s: IslandStatus }) {
   useTick();
   const style: CSSProperties = { fontFamily: "monospace", fontWeight: "bold", marginLeft: 8, whiteSpace: "nowrap" };
-  if (s.state === "now") return <span style={{ ...style, color: "#ff5c5c" }}>Tempête !</span>;
+  if (s.state === "now") {
+    const left = s.until ? s.until - backendNow() : 0;
+    return (
+      <span style={{ ...style, color: "#ff5c5c" }}>
+        Pluie{left > 0 && <span style={{ fontWeight: "normal" }}> · fin {formatCountdown(left)}</span>}
+      </span>
+    );
+  }
   if (s.state === "soon" && s.at) {
     const left = s.at - backendNow();
-    if (left <= 0) return <span style={{ ...style, color: "#ff5c5c" }}>Tempête !</span>;
+    if (left <= 0) return <span style={{ ...style, color: "#ff5c5c" }}>Pluie</span>;
     return (
       <span style={{ ...style, color: left < 600 ? "#ffc84d" : "#fff" }}>
         {formatCountdown(left)} <span style={{ color: "#999", fontWeight: "normal" }}>({formatClock(s.at)})</span>
@@ -433,6 +455,76 @@ function queueSettingsSave(patch: Partial<Settings>, onSaved: (s: State) => void
   }, 300);
 }
 
+function CalibrationSection({
+  state,
+  apply,
+  updateSettings,
+}: {
+  state: State;
+  apply: (s: State) => void;
+  updateSettings: (patch: Partial<Settings>) => void;
+}) {
+  const { settings, statuses } = state;
+  const [message, setMessage] = useState("");
+  const ordered = [...statuses].sort((a, b) => a.index - b.index);
+
+  return (
+    <PanelSection title="Calage">
+      <PanelSectionRow>
+        <div style={{ fontSize: 12, color: "#999", lineHeight: 1.4 }}>
+          Quand la pluie commence sur une de tes îles en jeu, appuie sur son bouton : le décalage entre le site et le
+          jeu se règle tout seul.
+        </div>
+      </PanelSectionRow>
+      {ordered.map((s) => (
+        <PanelSectionRow key={s.id}>
+          <ButtonItem
+            layout="below"
+            onClick={async () => {
+              const res = await calibrate(s.id);
+              apply(res);
+              setMessage(
+                res.calibrated === null
+                  ? `Aucune pluie prévue sur ${s.name} à moins d'une heure d'ici : décalage inchangé.`
+                  : `Décalage réglé à ${formatOffset(res.calibrated)}.`
+              );
+            }}
+          >
+            La pluie commence sur {s.name}
+          </ButtonItem>
+        </PanelSectionRow>
+      ))}
+      {message && (
+        <PanelSectionRow>
+          <div style={{ fontSize: 12, color: "#ffc84d" }}>{message}</div>
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <SliderField
+          label={`Décalage : ${formatOffset(settings.offset_seconds)}`}
+          description="Positif : la tempête arrive plus tard en jeu que sur le site."
+          value={settings.offset_seconds / 60}
+          min={-30}
+          max={30}
+          step={0.5}
+          onChange={(v) => updateSettings({ offset_seconds: Math.round(v * 60) })}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <SliderField
+          label={`Taille de la pluie : ${settings.rain_scale} %`}
+          description="100 % : la tempête dessinée sur la carte de Merfolk's Lullaby (~650 m de rayon)."
+          value={settings.rain_scale}
+          min={50}
+          max={400}
+          step={10}
+          onChange={(v) => updateSettings({ rain_scale: v })}
+        />
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
 function Content() {
   const [state, setState] = useState<State | null>(null);
   const [editMode, setEditMode] = useState(false);
@@ -523,8 +615,8 @@ function Content() {
             {state.forecast_error && <div style={{ color: "#ff8080" }}>{state.forecast_error}</div>}
             {state.islands_error && <div style={{ color: "#ff8080" }}>{state.islands_error}</div>}
             <div>
-              Heure de passage du centre de la tempête sur l'île, d'après les prévisions de Merfolk's Lullaby
-              (merfolkslullaby.com) : environ 2 h, actualisées toutes les 24 min.
+              Premières pluies sur l'île, calculées d'après les prévisions de Merfolk's Lullaby
+              (merfolkslullaby.com) : environ 2 h, actualisées toutes les 24 min. À caler en jeu ci-dessous.
             </div>
           </div>
         </PanelSectionRow>
@@ -545,6 +637,8 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+
+      <CalibrationSection state={state} apply={apply} updateSettings={updateSettings} />
 
       <PanelSection title="Overlay en jeu">
         <OverlayStatus state={state} onState={apply} />
@@ -596,7 +690,7 @@ function Content() {
         <PanelSectionRow>
           <ToggleField
             label="Masquer les îles sans tempête"
-            description="Sinon elles affichent « Pas de tempête » (rien de prévu dans les 2 h)."
+            description="Sinon elles affichent « Pas de tempête » (pas de pluie prévue dans les 2 h)."
             checked={settings.hide_without_storm}
             onChange={(v) => updateSettings({ hide_without_storm: v })}
           />

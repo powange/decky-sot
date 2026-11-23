@@ -1,16 +1,22 @@
 """Decky SoT: Sea of Thieves helpers for the Steam Deck.
 
-First feature: when the storm reaches the islands chosen by the player, shown
-in game through the shared Decky Overlay plugin (powange/decky-overlay).
+First feature: when the first rain of the storm reaches the islands chosen by
+the player, shown in game through the shared Decky Overlay plugin
+(powange/decky-overlay).
 
 The storm follows the same path on every server. Its forecast (about the next
 two hours) comes from the Merfolk's Lullaby GraphQL API, like the Stream Deck
-plugin powange/streamdeck-sot: each forecast point says when the centre of the
-storm is over an island. Nothing is read from the game itself.
+plugin powange/streamdeck-sot: each forecast point says when and where the
+centre of the storm is over an island. Between two points the centre moves the
+way their own map animates it (straight line, eased by speed), and the rain is
+a disc of their storm shape's size around it, so the first rain on an island is
+when that disc touches the island's outline. Two settings calibrate it against
+the game: the rain size and a time offset. Nothing is read from the game.
 """
 import asyncio
 import glob
 import json
+import math
 import os
 import re
 import ssl
@@ -28,10 +34,20 @@ FORECAST_MIN_AHEAD = 20 * 60    # refresh early when the forecast ends sooner th
 MIN_FETCH_INTERVAL = 2 * 60     # never call the API more often than this
 ISLANDS_TTL = 7 * 24 * 3600     # island list cache
 HORIZON = 2 * 3600              # beyond this, an island shows "Pas de tempête"
-FORECAST_QUERY = "query getBetaWeather { getBetaWeather { eid date } }"
+FORECAST_QUERY = "query getBetaWeather { getBetaWeather { eid date coordinates } }"
 ISLANDS_QUERY = ('query getElements { getElements(type: "island") '
                  '{ id attributes { type value localization { locale value } } } }')
 EXCLUDED_REALMS = {"sea-of-the-damned"}  # the storm never goes there
+ISLANDS_CACHE_VERSION = 2       # 2: island outlines added
+
+# ---- Storm model (from the Merfolk's Lullaby map) ------------------------- #
+# Map coordinates are longitude/latitude near (-64.4, 18.6). Longitudes are
+# scaled by cos(latitude) so distances are the same in every direction.
+LNG_SCALE = math.cos(math.radians(18.63))
+# Largest radius of their "StormShape" polygon, in scaled degrees (~650 m).
+STORM_RADIUS = 0.0059
+SAMPLE_STEP = 10                # seconds between two computed storm positions
+METERS_PER_DEGREE = 110574.0
 
 # ---- Decky Overlay --------------------------------------------------------- #
 OVERLAY_SOCKET = "/tmp/decky-overlay/overlay.sock"
@@ -57,6 +73,8 @@ DEFAULT_SETTINGS = {
     "hide_without_storm": False,  # hide islands the storm will not reach within 2 h
     "sort_by_time": True,       # soonest storm first, instead of the chosen order
     "show_under_minutes": 0,    # only show a countdown in its last N minutes (0 = always)
+    "rain_scale": 100,          # rain radius, % of the storm shape drawn by Merfolk's Lullaby
+    "offset_seconds": 0,        # added to every forecast time (game later than the site: > 0)
     "islands": [],              # chosen island ids, in the chosen order
     "overlay_install_prompted": False,
 }
@@ -105,6 +123,8 @@ SETTINGS_SCHEMA = {
     "hide_without_storm": _bool,
     "sort_by_time": _bool,
     "show_under_minutes": _number(0, 120),
+    "rain_scale": _number(50, 400),
+    "offset_seconds": _number(-3600, 3600),
     "islands": _island_ids,
     "overlay_install_prompted": _bool,
 }
@@ -138,8 +158,17 @@ def _parse_date(value):
         return None
 
 
+def _coordinates(value):
+    """'[lng, lat]' (JSON text) -> scaled (x, y), or None."""
+    try:
+        lng, lat = json.loads(value) if isinstance(value, str) else value
+        return (float(lng) * LNG_SCALE, float(lat))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_forecast(data):
-    """getBetaWeather -> [{"at": unix time, "eid": island id or None}], by time."""
+    """getBetaWeather -> [{"at", "eid", "pos"}], by time (pos: scaled x, y or None)."""
     out = []
     for p in (data or {}).get("getBetaWeather") or []:
         if not isinstance(p, dict):
@@ -148,7 +177,8 @@ def parse_forecast(data):
         if at is None:
             continue
         eid = p.get("eid")
-        out.append({"at": at, "eid": eid.upper() if isinstance(eid, str) and eid else None})
+        out.append({"at": at, "eid": eid.upper() if isinstance(eid, str) and eid else None,
+                    "pos": _coordinates(p.get("coordinates"))})
     out.sort(key=lambda p: p["at"])
     return out
 
@@ -165,8 +195,48 @@ def _english_name(attributes):
     return None
 
 
+def convex_hull(points):
+    """Andrew's monotone chain; returns the hull counter-clockwise."""
+    pts = sorted(set(points))
+    if len(pts) < 3:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _outline(attributes):
+    """Island "area" GeoJSON -> convex hull in scaled coordinates, rounded."""
+    area = next((a.get("value") for a in attributes or [] if isinstance(a, dict) and a.get("type") == "area"), None)
+    try:
+        geo = json.loads(area) if isinstance(area, str) else None
+        points = []
+        for feature in (geo or {}).get("features") or []:
+            geometry = feature.get("geometry") or {}
+            polygons = geometry.get("coordinates") or []
+            if geometry.get("type") == "Polygon":
+                polygons = [polygons]
+            for polygon in polygons:
+                for ring in polygon:
+                    points.extend((float(x) * LNG_SCALE, float(y)) for x, y in ring)
+    except (TypeError, ValueError, AttributeError):
+        return []
+    return [[round(x, 7), round(y, 7)] for x, y in convex_hull(points)]
+
+
 def parse_islands(data):
-    """getElements(type: "island") -> [{"id", "name"}], sorted by name."""
+    """getElements(type: "island") -> [{"id", "name", "hull"}], sorted by name."""
     out = {}
     for e in (data or {}).get("getElements") or []:
         if not isinstance(e, dict) or not isinstance(e.get("id"), str):
@@ -177,29 +247,103 @@ def parse_islands(data):
             continue
         name = _english_name(attrs)
         if name:
-            out[e["id"].upper()] = name
-    return sorted(({"id": i, "name": n} for i, n in out.items()), key=lambda i: i["name"].casefold())
+            out[e["id"].upper()] = {"id": e["id"].upper(), "name": name, "hull": _outline(attrs)}
+    return sorted(out.values(), key=lambda i: i["name"].casefold())
 
 
-def storm_status(forecast, island_id, now, horizon=HORIZON):
-    """Where the storm stands for one island.
+def _ease(fraction, speed):
+    """Progress along a segment, as the Merfolk's Lullaby map animates it."""
+    if speed <= 2.5:
+        return fraction ** 4
+    if speed <= 3.5:
+        return 1 - math.cos(fraction * math.pi / 2)
+    if speed <= 4.25:
+        return fraction * fraction
+    return -fraction * (fraction - 2)
 
-    {"state": "now"}            the centre of the storm is over the island
-    {"state": "soon", "at": t}  it reaches the island at t (within the horizon)
-    {"state": "none"}           not within the horizon
-    {"state": "unknown"}        no usable forecast
+
+def storm_position(forecast, t):
+    """Centre of the storm at time t (scaled x, y), or None outside the forecast."""
+    for a, b in zip(forecast, forecast[1:]):
+        if a["at"] <= t <= b["at"] and a["pos"] and b["pos"]:
+            duration = b["at"] - a["at"]
+            if duration <= 0:
+                return b["pos"]
+            dx, dy = b["pos"][0] - a["pos"][0], b["pos"][1] - a["pos"][1]
+            speed = math.hypot(dx, dy) * METERS_PER_DEGREE / duration
+            e = _ease((t - a["at"]) / duration, speed)
+            return (a["pos"][0] + dx * e, a["pos"][1] + dy * e)
+    return None
+
+
+def _segment_distance(p, a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = dx * dx + dy * dy
+    u = 0.0 if length == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length))
+    return math.hypot(a[0] + u * dx - p[0], a[1] + u * dy - p[1])
+
+
+def distance_to_outline(p, hull):
+    """Distance from point p to a convex outline (0 inside)."""
+    if not hull:
+        return math.inf
+    if len(hull) >= 3:
+        inside = True
+        for i in range(len(hull)):
+            a, b = hull[i], hull[(i + 1) % len(hull)]
+            if (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) < 0:
+                inside = False
+                break
+        if inside:
+            return 0.0
+    if len(hull) == 1:
+        return math.hypot(p[0] - hull[0][0], p[1] - hull[0][1])
+    return min(_segment_distance(p, hull[i], hull[(i + 1) % len(hull)]) for i in range(len(hull)))
+
+
+def rain_windows(forecast, hull, radius, step=SAMPLE_STEP):
+    """Rain periods over an island: [[start, end]] (unix times, no offset).
+
+    start is None when it already rains at the start of the forecast, end is
+    None when it still rains at its end.
     """
-    if not forecast or forecast[-1]["at"] < now:
+    usable = [p for p in forecast if p["pos"]]
+    if len(usable) < 2 or not hull:
+        return []
+    windows = []
+    t, last = usable[0]["at"], usable[-1]["at"]
+    raining = False
+    while True:
+        pos = storm_position(usable, t)
+        wet = pos is not None and distance_to_outline(pos, hull) <= radius
+        if wet and not raining:
+            windows.append([None if t == usable[0]["at"] else t, None])
+        elif raining and not wet:
+            windows[-1][1] = t
+        raining = wet
+        if t >= last:
+            break
+        t = min(last, t + step)
+    return windows
+
+
+def storm_status(windows, forecast_until, now, offset=0, horizon=HORIZON):
+    """Where the rain stands for one island.
+
+    {"state": "now", "until": t|None}  it rains on the island (until t)
+    {"state": "soon", "at": t}         first rain at t (within the horizon)
+    {"state": "none"}                  not within the horizon
+    {"state": "unknown"}               no usable forecast
+    """
+    if not forecast_until or forecast_until + offset < now:
         return {"state": "unknown"}
-    current = None
-    for p in forecast:
-        if p["at"] <= now:
-            current = p
-    if current is not None and current["eid"] == island_id:
-        return {"state": "now"}
-    for p in forecast:
-        if now < p["at"] <= now + horizon and p["eid"] == island_id:
-            return {"state": "soon", "at": p["at"]}
+    for start, end in windows:
+        start = None if start is None else start + offset
+        end = None if end is None else end + offset
+        if (start is None or start <= now) and (end is None or now < end):
+            return {"state": "now", "until": end}
+        if start is not None and now < start <= now + horizon:
+            return {"state": "soon", "at": start}
     return {"state": "none"}
 
 
@@ -334,7 +478,8 @@ class Plugin:
         self.state_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "state.json")
         self.islands_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "islands.json")
         self.settings = dict(DEFAULT_SETTINGS)
-        self.islands = []            # [{"id", "name"}] from the API (cached)
+        self.islands = []            # [{"id", "name", "hull"}] from the API (cached)
+        self.rain_cache = {}         # island id -> rain windows for the current forecast
         self.islands_at = 0.0
         self.islands_error = ""
         self.forecast = []
@@ -387,6 +532,8 @@ class Plugin:
         try:
             with open(self.islands_path) as f:
                 data = json.load(f)
+            if data.get("version") != ISLANDS_CACHE_VERSION:
+                raise FileNotFoundError  # older cache without outlines: fetch again
             self.islands = [i for i in data.get("islands", [])
                             if isinstance(i, dict) and isinstance(i.get("id"), str) and isinstance(i.get("name"), str)]
             self.islands_at = float(data.get("fetched_at", 0))
@@ -441,7 +588,9 @@ class Plugin:
                     islands = parse_islands(await asyncio.to_thread(_graphql, ISLANDS_QUERY))
                     if islands:
                         self.islands, self.islands_at, self.islands_error = islands, now, ""
-                        self._write_json(self.islands_path, {"fetched_at": now, "islands": islands})
+                        self.rain_cache = {}
+                        self._write_json(self.islands_path, {"version": ISLANDS_CACHE_VERSION,
+                                                             "fetched_at": now, "islands": islands})
                 except Exception as e:
                     self.islands_error = f"Liste des îles indisponible : {e}"
                     decky.logger.warning(self.islands_error)
@@ -452,6 +601,7 @@ class Plugin:
                     if not forecast:
                         raise RuntimeError("prévision vide")
                     self.forecast, self.forecast_at, self.forecast_error = forecast, now, ""
+                    self.rain_cache = {}
                 except Exception as e:
                     self.forecast_error = f"Prévision indisponible : {e}"
                     decky.logger.warning(self.forecast_error)
@@ -459,11 +609,24 @@ class Plugin:
             self.fetching = False
         self._sync_overlay()
 
+    def _rain_windows(self, island_id):
+        """Rain periods over one island (cached until the forecast or size changes)."""
+        if island_id not in self.rain_cache:
+            island = next((i for i in self.islands if i["id"] == island_id), None)
+            hull = [tuple(p) for p in (island or {}).get("hull") or []]
+            if not hull:
+                # No outline: the points where the storm centre is over the island.
+                hull = [p["pos"] for p in self.forecast if p["eid"] == island_id and p["pos"]][:1]
+            radius = STORM_RADIUS * self.settings["rain_scale"] / 100
+            self.rain_cache[island_id] = rain_windows(self.forecast, hull, radius)
+        return self.rain_cache[island_id]
+
     def _statuses(self, now):
         out = []
+        until = self.forecast[-1]["at"] if self.forecast else 0
         for index, island_id in enumerate(self.settings["islands"]):
-            out.append({"id": island_id, "name": self._island_name(island_id), "index": index,
-                        **storm_status(self.forecast, island_id, now)})
+            status = storm_status(self._rain_windows(island_id), until, now, self.settings["offset_seconds"])
+            out.append({"id": island_id, "name": self._island_name(island_id), "index": index, **status})
         if self.settings["sort_by_time"]:
             rank = {"now": 0, "soon": 1, "none": 2, "unknown": 2}
             out.sort(key=lambda s: (rank[s["state"]], s.get("at", 0), s["index"]))
@@ -489,7 +652,9 @@ class Plugin:
             limit = int(self.settings["show_under_minutes"]) * 60
             for s in self._statuses(now):
                 if s["state"] == "now":
-                    items.append({"label": s["name"], "text": "Tempête !", "style": "alert"})
+                    text = f"Pluie jusqu'à {time.strftime('%H:%M', time.localtime(s['until']))}" \
+                        if s.get("until") else "Pluie en cours"
+                    items.append({"label": s["name"], "text": text, "style": "alert"})
                 elif s["state"] == "soon":
                     item = {"label": s["name"], "countdown": {"end_at": s["at"]}}
                     if limit and not preview:
@@ -549,7 +714,7 @@ class Plugin:
             "settings": self.settings,
             "statuses": self._statuses(now),
             "forecast_at": self.forecast_at,
-            "forecast_until": self.forecast[-1]["at"] if self.forecast else 0,
+            "forecast_until": (self.forecast[-1]["at"] + self.settings["offset_seconds"]) if self.forecast else 0,
             "forecast_error": self.forecast_error,
             "islands_count": len(self.islands),
             "islands_error": self.islands_error,
@@ -587,7 +752,7 @@ class Plugin:
     async def get_islands(self):
         if not self.islands:
             await self._refresh()
-        return self.islands
+        return [{"id": i["id"], "name": i["name"]} for i in self.islands]
 
     async def refresh_forecast(self):
         await self._refresh(force=True)
@@ -616,8 +781,27 @@ class Plugin:
     async def save_settings(self, settings: dict):
         patch = _valid_settings(settings)
         patch.pop("islands", None)  # changed through add/remove/move only
+        if "rain_scale" in patch and patch["rain_scale"] != self.settings["rain_scale"]:
+            self.rain_cache = {}
         self.settings.update(patch)
         return self._changed()
+
+    async def calibrate(self, island_id: str):
+        """"The rain starts on this island now": sets the offset from the forecast.
+
+        Uses the predicted first rain on that island closest to now (without
+        offset), within an hour. Returns the state, with "calibrated" set to the
+        new offset in seconds, or None when there is nothing to match.
+        """
+        island_id = str(island_id).upper()
+        now = _now()
+        starts = [w[0] for w in self._rain_windows(island_id) if w[0] is not None]
+        best = min(starts, key=lambda t: abs(now - t), default=None)
+        if best is None or abs(now - best) > 3600:
+            return {**self._state(), "calibrated": None}
+        self.settings["offset_seconds"] = int(round(now - best))
+        state = self._changed()
+        return {**state, "calibrated": self.settings["offset_seconds"]}
 
     async def preview_overlay(self):
         self.preview_until = _now() + PREVIEW_SECONDS

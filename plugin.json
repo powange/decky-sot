@@ -9,6 +9,6 @@
       "overlay",
       "utility"
     ],
-    "description": "Sea of Thieves helpers: when the storm reaches your chosen islands, shown as an in-game overlay."
+    "description": "Sea of Thieves helpers: when the first rain of the storm reaches your chosen islands, shown as an in-game overlay."
   }
 }
