@@ -56,6 +56,7 @@ OVERLAY_CLIENT = "decky-sot"
 OVERLAY_BLOCK = "storm"
 OVERLAY_RETRY = 3               # seconds between connection attempts
 OVERLAY_MAX_ITEMS = 12          # per block, protocol limit
+OVERLAY_VALUE_MAX = 16          # longer texts are cut with "…" by the overlay
 PREVIEW_SECONDS = 10
 
 # ---- Game detection -------------------------------------------------------- #
@@ -652,7 +653,8 @@ class Plugin:
             limit = int(self.settings["show_under_minutes"]) * 60
             for s in self._statuses(now):
                 if s["state"] == "now":
-                    text = f"Pluie jusqu'à {time.strftime('%H:%M', time.localtime(s['until']))}" \
+                    # Decky Overlay shows at most VALUE_MAX (16) characters.
+                    text = f"Pluie, fin {time.strftime('%H:%M', time.localtime(s['until']))}" \
                         if s.get("until") else "Pluie en cours"
                     items.append({"label": s["name"], "text": text, "style": "alert"})
                 elif s["state"] == "soon":
@@ -664,7 +666,7 @@ class Plugin:
                     if not self.settings["hide_without_storm"] or preview:
                         items.append({"label": s["name"], "text": "Pas de tempête", "style": "muted"})
                 else:
-                    items.append({"label": s["name"], "text": "Prévision indispo.", "style": "warn"})
+                    items.append({"label": s["name"], "text": "Sans prévision", "style": "warn"})
             if preview and not items:
                 items.append({"label": "Aperçu Decky SoT", "text": "Choisis une île", "style": "muted"})
         if not items:

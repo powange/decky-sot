@@ -165,3 +165,17 @@ def test_no_api_call_without_need(plugin):
     assert not plugin._wants_data(T0)
     plugin.panel_open_until = T0 + 60
     assert plugin._wants_data(T0)
+
+
+def test_overlay_texts_fit(plugin, monkeypatch):
+    """Decky Overlay cuts values longer than 16 characters with an ellipsis."""
+    _setup(plugin)
+    texts = set()
+    for t in range(int(T0), int(UNTIL) + 600, 60):
+        for item in plugin._overlay_message(t).get("items", []):
+            if "text" in item:
+                texts.add(item["text"])
+    plugin.forecast = []
+    texts.update(i["text"] for i in plugin._overlay_message(T0)["items"])
+    assert any(t.startswith("Pluie, fin") for t in texts) and "Sans prévision" in texts
+    assert all(len(t) <= main.OVERLAY_VALUE_MAX for t in texts), texts
