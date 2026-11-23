@@ -653,10 +653,13 @@ class Plugin:
             limit = int(self.settings["show_under_minutes"]) * 60
             for s in self._statuses(now):
                 if s["state"] == "now":
-                    # Decky Overlay shows at most VALUE_MAX (16) characters.
-                    text = f"Pluie, fin {time.strftime('%H:%M', time.localtime(s['until']))}" \
-                        if s.get("until") else "Pluie en cours"
-                    items.append({"label": s["name"], "text": text, "style": "alert"})
+                    if s.get("until"):
+                        # Time left until the rain stops. Decky Overlay >= 0.3 colours it
+                        # (countdown style) and wraps the longer label on two lines.
+                        items.append({"label": f"{s['name']} · fin de la pluie",
+                                      "countdown": {"end_at": s["until"]}, "style": "alert"})
+                    else:
+                        items.append({"label": s["name"], "text": "Pluie en cours", "style": "alert"})
                 elif s["state"] == "soon":
                     item = {"label": s["name"], "countdown": {"end_at": s["at"]}}
                     if limit and not preview:

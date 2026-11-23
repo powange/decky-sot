@@ -7,7 +7,7 @@ Des aides pour Sea of Thieves sur le Steam Deck, affichées en jeu via [Decky Ov
 Choisis jusqu'à 12 îles : l'overlay affiche pour chacune dans combien de temps les **premières pluies** y arrivent.
 
 - **Compte à rebours** : la pluie arrive sur l'île dans les 2 prochaines heures.
-- **Pluie, fin HH:MM** : il pleut sur l'île en ce moment, jusqu'à l'heure indiquée.
+- **« Île · fin de la pluie » en rouge** : il pleut sur l'île en ce moment, le compte à rebours donne le temps avant la fin de la pluie. La couleur rouge et le nom sur deux lignes demandent Decky Overlay 0.3 ou plus.
 - **Pas de tempête** : pas de pluie prévue dans les 2 h (option pour masquer ces îles).
 
 ### Comment c'est calculé

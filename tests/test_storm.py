@@ -115,8 +115,12 @@ def test_overlay_rain_now(plugin):
     _setup(plugin)
     plugin.settings.update(hide_without_storm=True, sort_by_time=False)
     msg = plugin._overlay_message(centre_time(A))
-    alpha = next(i for i in msg["items"] if i["label"] == "Alpha")
-    assert alpha["style"] == "alert" and alpha["text"].startswith("Pluie")
+    alpha = next(i for i in msg["items"] if i["label"].startswith("Alpha"))
+    assert alpha["style"] == "alert"
+    if "countdown" in alpha:
+        assert alpha["label"] == "Alpha · fin de la pluie" and alpha["countdown"]["end_at"] > centre_time(A)
+    else:
+        assert alpha["text"] == "Pluie en cours"
     assert "Nulle part" not in [i["label"] for i in msg["items"]]
 
 
@@ -177,5 +181,5 @@ def test_overlay_texts_fit(plugin, monkeypatch):
                 texts.add(item["text"])
     plugin.forecast = []
     texts.update(i["text"] for i in plugin._overlay_message(T0)["items"])
-    assert any(t.startswith("Pluie, fin") for t in texts) and "Sans prévision" in texts
+    assert "Sans prévision" in texts and "Pas de tempête" in texts
     assert all(len(t) <= main.OVERLAY_VALUE_MAX for t in texts), texts

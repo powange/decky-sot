@@ -1,6 +1,6 @@
 {
   "name": "decky-sot",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Decky Loader plugin: Sea of Thieves helpers (storm forecast for chosen islands) shown as an in-game overlay on the Steam Deck",
   "type": "module",
   "scripts": {
